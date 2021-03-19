@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform:
+  - 'AWS::Serverless-2016-10-31'
+  - 'AWS::CodeStar'
+Parameters:
+  ProjectId:
+    Type: String
+    Description: AWS CodeStar projectID used to associate new resources to team members
+  ConfigurationBucketName:
+    Type: String
+  ConfigurationKey:
+    Type: String
+  SESRulesetName:
+    Type: String
+  SESVoipMSRecipientAddress:
+    Type: String
+  SingleVoicemailDebugMode:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  LogLevel:
+    Type: String
+    AllowedValues:
+      - trace
+      - debug
+      - info
+      - warn
+      - error
+      - silent
+    Default: info
+Metadata:
+  'AWS::ServerlessRepo::Application':
+    Name: voipms-notification
+    Description: >-
+      Upon email notification, downloads voicemails from Voip.ms and transcribes
+      them
+    Author: Nathan Sutcliffe
+    Labels:
+      - voip
+      - transcribe
+    HomePageUrl: 'https://github.com/user1/my-app-project'
+    SemanticVersion: 0.0.1
+    SourceCodeUrl: >-
+      https://us-west-2.console.aws.amazon.com/codesuite/codecommit/repositories/voicemail-transcribe/browse?region=us-west-2
+Resources:
+  ReceiptRule:
+    Type: 'AWS::SES::ReceiptRule'
+    Properties:
+      RuleSetName:
+        Ref: SESRulesetName
+      Rule:
+        Actions:
+          - LambdaAction:
+              FunctionArn:
+                'Fn::GetAtt':
+                  - EmailReceiptLambda
+                  - Arn
+        Enabled: true
+        Name:
+          'Fn::Sub': 'voipms-notifications-${AWS::StackName}'
+        Recipients:
+          - Ref: SESVoipMSRecipientAddress
+        ScanEnabled: false
+    DependsOn: LambdaSESPolicy
+  MailboxLockTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: tenantidmailbox
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenantidmailbox
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expirationTime
+        Enabled: true
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  EmailReceiptLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: built/email-receipt/index.handler
+      Runtime: nodejs12.x
+      Timeout: 900
+      Policies:
+        - S3ReadPolicy:
+            BucketName:
+              Ref: ConfigurationBucketName
+        - AWSXRayDaemonWriteAccess
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'dynamodb:DeleteItem'
+                - 'dynamodb:PutItem'
+                - 'dynamodb:Query'
+                - 'dynamodb:UpdateItem'
+              Resource:
+                - 'Fn::GetAtt':
+                    - MailboxLockTable
+                    - Arn
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+              Resource:
+                - 'Fn::Sub': 'arn:aws:s3:::${AWS::StackName}-voicemailaudio/*'
+      Environment:
+        Variables:
+          MAILBOX_LOCK_TABLE_NAME:
+            Ref: MailboxLockTable
+          VOICEMAIL_AUDIO_BUCKET_NAME:
+            'Fn::Sub': '${AWS::StackName}-voicemailaudio'
+          ConfigurationBucketName:
+            Ref: ConfigurationBucketName
+          ConfigurationKey:
+            Ref: ConfigurationKey
+          SINGLE_VOICEMAIL_DEBUG_MODE:
+            Ref: SingleVoicemailDebugMode
+          LOG_LEVEL:
+            Ref: LogLevel
+      Tracing: Active
+  VoicemailTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: tenantid
+          AttributeType: S
+        - AttributeName: voicemailid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenantid
+          KeyType: HASH
+        - AttributeName: voicemailid
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  AddVoicemailToIndexLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+  AddVoicemailToIndexLambdaExecutionRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:PutItem'
+            Resource:
+              - 'Fn::GetAtt':
+                  - VoicemailTable
+                  - Arn
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - 'Fn::Sub': '${VoicemailAudioBucket.Arn}/*'
+          - Effect: Allow
+            Action:
+              - 'lambda:InvokeFunction'
+            Resource:
+              - 'Fn::GetAtt':
+                  - TranscribeLambda
+                  - Arn
+      PolicyName: AddVoicemailToIndexLambdaExecutionRolePolicy
+      Roles:
+        - Ref: AddVoicemailToIndexLambdaExecutionRole
+  AddVoicemailToIndexLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: built/add-voicemail-to-index/index.handler
+      Runtime: nodejs12.x
+      Timeout: 10
+      Role:
+        'Fn::GetAtt':
+          - AddVoicemailToIndexLambdaExecutionRole
+          - Arn
+      Environment:
+        Variables:
+          VOICEMAIL_TABLE_NAME:
+            Ref: VoicemailTable
+          LOG_LEVEL:
+            Ref: LogLevel
+      Tracing: Active
+  AddVoicemailToIndexInvokeConfig:
+    Type: 'AWS::Lambda::EventInvokeConfig'
+    Properties:
+      FunctionName:
+        Ref: AddVoicemailToIndexLambda
+      Qualifier: $LATEST
+      DestinationConfig:
+        OnSuccess:
+          Destination:
+            'Fn::GetAtt':
+              - TranscribeLambda
+              - Arn
+    DependsOn: AddVoicemailToIndexLambdaExecutionRolePolicy
+  TranscribeLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+  TranscribeLambdaExecutionRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'transcribe:StartTranscriptionJob'
+            Resource:
+              - '*'
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - 'Fn::Sub': '${VoicemailAudioBucket.Arn}/*'
+          - Effect: Allow
+            Action:
+              - 's3:PutObject'
+            Resource:
+              - 'Fn::Sub': '${VoicemailTranscriptBucket.Arn}/*'
+      PolicyName: TranscribeLambdaExecutionRolePolicy
+      Roles:
+        - Ref: TranscribeLambdaExecutionRole
+  TranscribeLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: built/transcribe/index.handler
+      Runtime: nodejs12.x
+      Timeout: 10
+      Role:
+        'Fn::GetAtt':
+          - TranscribeLambdaExecutionRole
+          - Arn
+      Environment:
+        Variables:
+          VOICEMAIL_TRANSCRIPT_BUCKET_NAME:
+            Ref: VoicemailTranscriptBucket
+          LOG_LEVEL:
+            Ref: LogLevel
+      Tracing: Active
+  TranscriptNotificationLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess'
+  TranscriptNotificationLambdaExecutionRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ses:SendEmail'
+            Resource:
+              - 'arn:aws:ses:*:*:identity/*'
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - 'Fn::Sub': '${VoicemailTranscriptBucket.Arn}/*'
+              - 'Fn::Sub': 'arn:aws:s3:::${ConfigurationBucketName}/*'
+          - Effect: Allow
+            Action:
+              - 'dynamodb:UpdateItem'
+            Resource:
+              - 'Fn::GetAtt':
+                  - VoicemailTable
+                  - Arn
+      PolicyName: TranscriptNotificationLambdaExecutionRolePolicy
+      Roles:
+        - Ref: TranscriptNotificationLambdaExecutionRole
+  TranscriptNotificationLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: built/transcript-notification/index.handler
+      Runtime: nodejs12.x
+      Timeout: 10
+      MemorySize: 256
+      Role:
+        'Fn::GetAtt':
+          - TranscriptNotificationLambdaExecutionRole
+          - Arn
+      Events:
+        S3TriggerEvent:
+          Type: S3
+          Properties:
+            Bucket:
+              Ref: VoicemailTranscriptBucket
+            Events: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+      Environment:
+        Variables:
+          VOICEMAIL_TABLE_NAME:
+            Ref: VoicemailTable
+          ConfigurationBucketName:
+            Ref: ConfigurationBucketName
+          ConfigurationKey:
+            Ref: ConfigurationKey
+          LOG_LEVEL:
+            Ref: LogLevel
+      Tracing: Active
+  S3InvokeLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName:
+        Ref: AddVoicemailToIndexLambda
+      Principal: s3.amazonaws.com
+      SourceArn:
+        'Fn::Sub': 'arn:aws:s3:::${AWS::StackName}-voicemailaudio'
+  VoicemailAudioBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName:
+        'Fn::Sub': '${AWS::StackName}-voicemailaudio'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function:
+              'Fn::GetAtt':
+                - AddVoicemailToIndexLambda
+                - Arn
+  VoicemailTranscriptBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  LambdaSESPolicy:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Principal: ses.amazonaws.com
+      SourceAccount:
+        Ref: 'AWS::AccountId'
+      Action: 'lambda:InvokeFunction'
+      FunctionName:
+        'Fn::GetAtt':
+          - EmailReceiptLambda
+          - Arn

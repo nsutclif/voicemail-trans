@@ -1,0 +1,34 @@
+{
+    "name": "hello-world",
+    "description": "Sample NodeJs web application",
+    "version": "0.0.1",
+    "private": true,
+    "devDependencies": {
+        "@types/aws-lambda": "*",
+        "@types/node": "12.x",
+        "@types/request-promise-native": "*",
+        "@typescript-eslint/eslint-plugin": "*",
+        "@typescript-eslint/eslint-plugin-tslint": "^2.23.0",
+        "@typescript-eslint/parser": "^2.23.0",
+        "aws-sdk": "*",
+        "eslint": "*",
+        "mocha": "*",
+        "typescript": "*",
+        "tslint": "*"
+    },
+    "dependencies": {
+        "aws-embedded-metrics": "*",
+        "aws-xray-sdk": "^3.0.0-alpha.2",
+        "loglevel": "^1.6.7",
+        "moment": "*",
+        "openpgp": "*",
+        "request": "*",
+        "request-promise-native": "*"
+    },
+    "scripts": {
+        "test": "mocha --recursive tests",
+        "lint": "eslint ./source --ext .ts",
+        "compile": "tsc",
+        "build": "npm run lint && npm run compile"
+    }
+}

@@ -1,0 +1,24 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      nodejs: 12
+    commands:
+      - pip install --upgrade awscli
+      - aws --version
+      - node --version
+      - npm --version
+      - npm upgrade -g npm
+  build:
+    commands:
+      - npm install
+      - npm run build
+      - npm prune --production
+      - rm -rf source
+      - >-
+        aws cloudformation package --template template.yml --s3-bucket
+        $S3_BUCKET --output-template template-export.yml
+artifacts:
+  type: zip
+  files:
+    - template-export.yml
